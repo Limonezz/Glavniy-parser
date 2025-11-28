@@ -7,6 +7,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 import logging
 import hashlib
+import re
 
 # ===== ТВОИ ДАННЫЕ =====
 API_ID = 30519385
@@ -126,6 +127,40 @@ def mark_message_processed(conn, message_hash, text, keywords):
     )
     conn.commit()
 
+# ===== БЕЗОПАСНОЕ ФОРМАТИРОВАНИЕ =====
+def safe_format_message(sender_name, message_time, found_keywords, message_text):
+    """Безопасное форматирование без Markdown"""
+    
+    # Очищаем текст от проблемных символов
+    def clean_text(text):
+        if not text:
+            return ""
+        # Удаляем Markdown символы
+        text = re.sub(r'[*_`\[\]()]', '', text)
+        # Обрезаем длинные тексты
+        if len(text) > 1200:
+            text = text[:1200] + "..."
+        return text
+    
+    sender_name = clean_text(sender_name)
+    keywords_str = clean_text(', '.join(found_keywords))
+    message_text = clean_text(message_text)
+    
+    # Форматируем без Markdown
+    formatted_message = (
+        f"🔍 ВАЖНАЯ НОВОСТЬ\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 Источник: {sender_name}\n"
+        f"🕒 Время: {message_time}\n"
+        f"🎯 Ключевые слова: {keywords_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 Сообщение:\n{message_text}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Отфильтровано NewsAnalyzer"
+    )
+    
+    return formatted_message
+
 # ===== ОСНОВНОЙ КОД =====
 async def main():
     logger.info("🚀 ЗАПУСК NEWS ANALYZER...")
@@ -157,9 +192,8 @@ async def main():
             
             await bot_client.send_message(
                 1175795428,
-                "❌ **НЕ НАЙДЕН ЧАТ!**\n\n"
-                "Добавь @Ezzlime в чат с новостями или отправь /chats для списка чатов",
-                parse_mode='md'
+                "❌ НЕ НАЙДЕН ЧАТ!\n\n"
+                "Добавь @Ezzlime в чат с новостями или отправь /chats для списка чатов"
             )
             return
         
@@ -180,6 +214,7 @@ async def main():
                 # Проверяем дубликаты
                 message_hash = generate_message_hash(message_text)
                 if is_message_processed(db_conn, message_hash):
+                    logger.debug("⏭️ Сообщение уже обработано")
                     return
                 
                 # Анализируем сообщение
@@ -189,25 +224,22 @@ async def main():
                         found_keywords.append(keyword)
                 
                 if found_keywords:
-                    logger.info(f"🎯 НАЙДЕНО: {len(found_keywords)} ключевых слов")
+                    logger.info(f"🎯 НАЙДЕНО: {len(found_keywords)} ключевых слов - {found_keywords}")
                     
                     moscow_tz = pytz.timezone('Europe/Moscow')
                     message_time = message.date.astimezone(moscow_tz).strftime('%H:%M %d.%m.%Y')
                     
-                    formatted_message = (
-                        f"🔍 **ВАЖНАЯ НОВОСТЬ**\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🤖 **Источник:** {sender_name}\n"
-                        f"🕒 **Время:** {message_time}\n"
-                        f"🎯 **Ключевые слова:** {', '.join(found_keywords)}\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📝 **Сообщение:**\n{message_text}\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"*Отфильтровано NewsAnalyzer*"
+                    # Используем безопасное форматирование
+                    formatted_message = safe_format_message(
+                        sender_name, 
+                        message_time, 
+                        found_keywords, 
+                        message_text
                     )
                     
                     try:
-                        await bot_client.send_message(1175795428, formatted_message, parse_mode='md')
+                        # Отправляем без parse_mode
+                        await bot_client.send_message(1175795428, formatted_message)
                         logger.info("✅ Уведомление отправлено!")
                         mark_message_processed(db_conn, message_hash, message_text, ", ".join(found_keywords))
                     except Exception as e:
@@ -219,35 +251,53 @@ async def main():
         # Команды
         @bot_client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
-            await event.reply("✅ NewsAnalyzer активен! Отслеживаю важные новости.")
+            await event.reply(
+                "✅ NewsAnalyzer активен! Отслеживаю важные новости.\n\n"
+                f"💬 Чат: {SOURCE_CHAT_ID}\n"
+                f"🎯 Ключевых слов: {len(KEYWORDS)}\n"
+                f"👤 Аккаунт: @Ezzlime"
+            )
         
         @bot_client.on(events.NewMessage(pattern='/chats'))
         async def chats_handler(event):
-            chats_list = []
+            chats_list = ["📋 ДОСТУПНЫЕ ЧАТЫ:\n"]
             async for dialog in user_client.iter_dialogs(limit=15):
-                chats_list.append(f"💬 {dialog.name}: `{dialog.id}`")
+                chats_list.append(f"💬 {dialog.name}: {dialog.id}")
             
-            await event.reply("\n".join(chats_list) if chats_list else "❌ Нет доступных чатов")
+            message = "\n".join(chats_list) if chats_list else "❌ Нет доступных чатов"
+            await event.reply(message)
         
         @bot_client.on(events.NewMessage(pattern='/status'))
         async def status_handler(event):
-            await event.reply(f"✅ Активен! Мониторю чат: {SOURCE_CHAT_ID}")
+            cursor = db_conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM processed_messages")
+            total = cursor.fetchone()[0]
+            
+            await event.reply(
+                f"📊 СТАТУС:\n\n"
+                f"✅ Активен\n"
+                f"💬 Чат: {SOURCE_CHAT_ID}\n"
+                f"🎯 Ключевых слов: {len(KEYWORDS)}\n"
+                f"📈 Обработано: {total}\n"
+                f"👤 Аккаунт: @Ezzlime"
+            )
         
         logger.info(f"🔄 НАЧИНАЮ МОНИТОРИНГ ЧАТА {SOURCE_CHAT_ID}...")
         
+        # Тестовое уведомление
         await bot_client.send_message(
             1175795428,
-            f"🟢 **NewsAnalyzer запущен!**\n\n"
+            f"🟢 NewsAnalyzer запущен!\n\n"
             f"✅ Мониторю чат: {SOURCE_CHAT_ID}\n"
             f"🎯 Ключевых слов: {len(KEYWORDS)}\n"
-            f"👤 Аккаунт: @Ezzlime",
-            parse_mode='md'
+            f"👤 Аккаунт: @Ezzlime\n\n"
+            f"🔄 Начинаю мониторинг..."
         )
         
         await user_client.run_until_disconnected()
         
     except Exception as e:
-        logger.error(f"💥 Ошибка: {e}")
+        logger.error(f"💥 Критическая ошибка: {e}")
     finally:
         await user_client.disconnect()
         await bot_client.disconnect()
