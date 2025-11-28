@@ -1,1 +1,7 @@
-
+*.session
+*.session-journal
+*.db
+*.log
+*_subscribers.txt
+__pycache__/
+.env
