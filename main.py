@@ -14,9 +14,13 @@ API_HASH = 'fa0fc5cd3b68e94c7ce1d9c4c984df9d'
 SESSION_STRING = '1ApWapzMBuyYciqhblZyGuoTsE_AaOPzwhc1OwGU5LLFhSuUes1Haofveo_gpSCiWyq_ey4VligWxXfjbh6DEO2sqAB95zSmty6baD_f6AN-NxRDy390hyeMsSZ_A0JTLNjQ3Emp0jUcvFwgOT0UINw_3_qzNRxM-VdjJ89W8yxw9DEqMFaJ-xaOuPai9QXzQmLxisTo8UrTiS98vvIsPVBi8EXQt8r2BLBEZM_fzuZP56U1tiYjnRTsaVPK5gjEL_Z8Gg4RNfKK5axCewarHDS2GSAHTnUoSeB1tF0w_BbinN-8tcZK0zMGGKgAaeHX13MRdB9JOFOakOL57Y4WMf1eebUxGlEs='
 
 BOT_TOKEN = '8573638786:AAGVbZBTb914ileFKmGXbWLUsIQzwo5gXi8'
-SOURCE_CHAT_ID = 1003474109106
 
-# Ключевые слова для фильтрации
+# Пробуем разные варианты ID чата
+POSSIBLE_CHAT_IDS = [
+    1003474109106,  # Оригинальный ID
+    -1003474109106, # Возможно с минусом
+]
+
 KEYWORDS = [
     'обстрел', 'атака', 'прилет', 'диверсант', 'ДРГ', 'ракета', 'Искандер',
     'пленный', 'плен', 'РЭБ', 'наступление', 'штурм', 'артобстрел',
@@ -30,16 +34,35 @@ KEYWORDS = [
     'Крым', 'Белгород', 'Курск', 'Брянск', 'Херсон'
 ]
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('news_analyzer.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('NewsAnalyzer')
+
+# ===== ПОИСК ЧАТА =====
+async def find_target_chat(client):
+    """Находит чат с новостями автоматически"""
+    logger.info("🔍 Ищу чат с новостями...")
+    
+    target_chat = None
+    
+    async for dialog in client.iter_dialogs():
+        # Ищем по ключевым словам в названии
+        if any(keyword in dialog.name.lower() for keyword in ['новост', 'парсер', 'канал', 'news']):
+            logger.info(f"🎯 НАЙДЕН ЧАТ: {dialog.name} -> {dialog.id}")
+            target_chat = dialog
+            break
+        
+        # Или проверяем известные ID
+        if dialog.id in POSSIBLE_CHAT_IDS or abs(dialog.id) in [abs(pid) for pid in POSSIBLE_CHAT_IDS]:
+            logger.info(f"🎯 НАЙДЕН ЧАТ ПО ID: {dialog.name} -> {dialog.id}")
+            target_chat = dialog
+            break
+    
+    if target_chat:
+        logger.info(f"✅ Использую чат: {target_chat.name} (ID: {target_chat.id})")
+        return target_chat.id
+    else:
+        logger.error("❌ Не удалось найти подходящий чат")
+        return None
 
 # ===== БАЗА ДАННЫХ =====
 def init_db():
@@ -76,38 +99,40 @@ def mark_message_processed(conn, message_hash, text, keywords):
 async def main():
     logger.info("🚀 ЗАПУСК NEWS ANALYZER...")
     
-    # Инициализация базы данных
     db_conn = init_db()
-    
-    # User client для чтения сообщений из чата
     user_client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-    
-    # Bot client для отправки уведомлений
     bot_client = TelegramClient('bot_notifier', API_ID, API_HASH)
     
     try:
-        # Запускаем user client
         await user_client.start()
         logger.info("✅ User client запущен")
         
-        # Запускаем bot client
         await bot_client.start(bot_token=BOT_TOKEN)
         logger.info("✅ Bot client запущен")
         
-        # Получаем информацию об аккаунте
         me = await user_client.get_me()
-        logger.info(f"👤 Аккаунт: {me.first_name} (@{me.username or 'no username'})")
+        logger.info(f"👤 Аккаунт: {me.first_name} (@{me.username})")
         
-        # Проверяем доступ к чату
-        try:
-            chat = await user_client.get_entity(SOURCE_CHAT_ID)
-            logger.info(f"✅ Доступ к чату: {chat.title if hasattr(chat, 'title') else 'Unknown'}")
-        except Exception as e:
-            logger.error(f"❌ Нет доступа к чату {SOURCE_CHAT_ID}: {e}")
-            logger.info("💡 Добавь этот аккаунт в чат как участника!")
+        # Ищем чат автоматически
+        SOURCE_CHAT_ID = await find_target_chat(user_client)
+        
+        if not SOURCE_CHAT_ID:
+            logger.error("❌ Не найден чат для мониторинга!")
+            
+            # Показываем все доступные чаты
+            logger.info("📋 Доступные чаты:")
+            async for dialog in user_client.iter_dialogs(limit=10):
+                logger.info(f"   💬 {dialog.name} -> {dialog.id}")
+            
+            await bot_client.send_message(
+                1175795428,
+                "❌ **НЕ НАЙДЕН ЧАТ!**\n\n"
+                "Добавь @Ezzlime в чат с новостями или отправь /chats для списка чатов",
+                parse_mode='md'
+            )
             return
         
-        # Обработчик новых сообщений в чате
+        # Обработчик сообщений
         @user_client.on(events.NewMessage(chats=SOURCE_CHAT_ID))
         async def chat_message_handler(event):
             try:
@@ -124,23 +149,20 @@ async def main():
                 # Проверяем дубликаты
                 message_hash = generate_message_hash(message_text)
                 if is_message_processed(db_conn, message_hash):
-                    logger.debug("⏭️ Сообщение уже обработано")
                     return
                 
-                # Анализируем сообщение на ключевые слова
+                # Анализируем сообщение
                 found_keywords = []
                 for keyword in KEYWORDS:
                     if keyword.lower() in message_text.lower():
                         found_keywords.append(keyword)
                 
                 if found_keywords:
-                    logger.info(f"🎯 НАЙДЕНО КЛЮЧЕВЫХ СЛОВ: {len(found_keywords)} - {found_keywords}")
+                    logger.info(f"🎯 НАЙДЕНО: {len(found_keywords)} ключевых слов")
                     
-                    # Форматируем время
                     moscow_tz = pytz.timezone('Europe/Moscow')
                     message_time = message.date.astimezone(moscow_tz).strftime('%H:%M %d.%m.%Y')
                     
-                    # Создаем красивое сообщение
                     formatted_message = (
                         f"🔍 **ВАЖНАЯ НОВОСТЬ**\n"
                         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -153,86 +175,48 @@ async def main():
                         f"*Отфильтровано NewsAnalyzer*"
                     )
                     
-                    # Отправляем уведомление
                     try:
-                        await bot_client.send_message(
-                            1175795428,  # Твой ID
-                            formatted_message, 
-                            parse_mode='md',
-                            link_preview=False
-                        )
-                        logger.info(f"✅ Уведомление отправлено!")
-                        
-                        # Помечаем как обработанное
+                        await bot_client.send_message(1175795428, formatted_message, parse_mode='md')
+                        logger.info("✅ Уведомление отправлено!")
                         mark_message_processed(db_conn, message_hash, message_text, ", ".join(found_keywords))
-                        
                     except Exception as e:
-                        logger.error(f"❌ Ошибка отправки уведомления: {e}")
-                
-                else:
-                    logger.debug("⏭️ Ключевые слова не найдены")
-                    
+                        logger.error(f"❌ Ошибка отправки: {e}")
+                        
             except Exception as e:
-                logger.error(f"💥 Ошибка обработки сообщения: {e}")
+                logger.error(f"💥 Ошибка обработки: {e}")
         
-        # Команды для бота
+        # Команды
         @bot_client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
-            await event.reply(
-                "🔍 **NewsAnalyzer активен!**\n\n"
-                f"💬 Мониторим чат: {SOURCE_CHAT_ID}\n"
-                f"🎯 Ключевых слов: {len(KEYWORDS)}\n"
-                f"✅ Получаешь важные новости\n\n"
-                "✨ Команды:\n"
-                "/status - статус системы\n"
-                "/stats - статистика"
-            )
+            await event.reply("✅ NewsAnalyzer активен! Отслеживаю важные новости.")
+        
+        @bot_client.on(events.NewMessage(pattern='/chats'))
+        async def chats_handler(event):
+            chats_list = []
+            async for dialog in user_client.iter_dialogs(limit=15):
+                chats_list.append(f"💬 {dialog.name}: `{dialog.id}`")
+            
+            await event.reply("\n".join(chats_list) if chats_list else "❌ Нет доступных чатов")
         
         @bot_client.on(events.NewMessage(pattern='/status'))
         async def status_handler(event):
-            await event.reply(
-                f"📊 **СТАТУС СИСТЕМЫ:**\n\n"
-                f"✅ User client: работает\n"
-                f"✅ Bot client: работает\n"
-                f"💬 Чат: {SOURCE_CHAT_ID}\n"
-                f"🎯 Ключевых слов: {len(KEYWORDS)}\n"
-                f"🔧 Все системы в норме"
-            )
+            await event.reply(f"✅ Активен! Мониторю чат: {SOURCE_CHAT_ID}")
         
-        @bot_client.on(events.NewMessage(pattern='/stats'))
-        async def stats_handler(event):
-            cursor = db_conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM processed_messages")
-            total = cursor.fetchone()[0]
-            
-            await event.reply(
-                f"📈 **СТАТИСТИКА:**\n\n"
-                f"📊 Обработано сообщений: {total}\n"
-                f"🎯 Ключевых слов: {len(KEYWORDS)}\n"
-                f"💬 Мониторим чат: {SOURCE_CHAT_ID}"
-            )
+        logger.info(f"🔄 НАЧИНАЮ МОНИТОРИНГ ЧАТА {SOURCE_CHAT_ID}...")
         
-        logger.info("🔄 НАЧИНАЮ МОНИТОРИНГ ЧАТА...")
-        logger.info(f"🎯 Отслеживаю {len(KEYWORDS)} ключевых слов")
+        await bot_client.send_message(
+            1175795428,
+            f"🟢 **NewsAnalyzer запущен!**\n\n"
+            f"✅ Мониторю чат: {SOURCE_CHAT_ID}\n"
+            f"🎯 Ключевых слов: {len(KEYWORDS)}\n"
+            f"👤 Аккаунт: @Ezzlime",
+            parse_mode='md'
+        )
         
-        # Отправляем тестовое уведомление
-        try:
-            await bot_client.send_message(
-                1175795428,
-                "🟢 **NewsAnalyzer запущен!**\n\n"
-                f"✅ Начинаю мониторинг чата: {SOURCE_CHAT_ID}\n"
-                f"🎯 Ключевых слов: {len(KEYWORDS)}\n"
-                f"⏰ {datetime.now().strftime('%H:%M %d.%m.%Y')}",
-                parse_mode='md'
-            )
-        except Exception as e:
-            logger.warning(f"Не удалось отправить тестовое уведомление: {e}")
-        
-        # Запускаем мониторинг
         await user_client.run_until_disconnected()
         
     except Exception as e:
-        logger.error(f"💥 Критическая ошибка: {e}")
+        logger.error(f"💥 Ошибка: {e}")
     finally:
         await user_client.disconnect()
         await bot_client.disconnect()
